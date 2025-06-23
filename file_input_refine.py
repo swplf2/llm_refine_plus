@@ -110,10 +110,10 @@ class Feedback(BaseModel):
 
 
 class Refine(BaseModel):
-    """Enhanced translation model with cleanup and validation"""
+    """Enhanced translation model with cleanup and validation for multiple language pairs"""
     translation: str = Field(
         default="", 
-        description="High-quality Vietnamese translation",
+        description="High-quality translation in target language",
         min_length=1,
         max_length=1000
     )
@@ -124,7 +124,8 @@ class Refine(BaseModel):
             translation = str(data['translation']).strip()
             # Remove common parsing artifacts
             translation = re.sub(r'^["\'\`]{1,3}|["\'\`]{1,3}$', '', translation)
-            translation = re.sub(r'^(Translation|Dịch|Bản dịch):\s*', '', translation, flags=re.IGNORECASE)
+            # Remove common prefixes in multiple languages
+            translation = re.sub(r'^(Translation|Dịch|Bản dịch|Traducción|Traduction|翻译|翻譯|번역):\s*', '', translation, flags=re.IGNORECASE)
             translation = re.sub(r'\n+', ' ', translation)  # Replace newlines
             translation = re.sub(r'\s+', ' ', translation)  # Normalize spaces
             data['translation'] = translation
@@ -132,16 +133,18 @@ class Refine(BaseModel):
         super().__init__(**data)
 
 
-def load_text_files(source_file: str, translation_file: str = None) -> tuple:
+def load_text_files(source_file: str, translation_file: str = None, src_lang: str = "English", tgt_lang: str = "Vietnamese") -> tuple:
     """
     Load source and translation files with proper encoding handling
     
     Args:
         source_file: Path to source language file
         translation_file: Optional path to existing translation file
+        src_lang: Source language name (e.g., "English", "French", "Chinese")
+        tgt_lang: Target language name (e.g., "Vietnamese", "Spanish", "German")
     
     Returns:
-        tuple: (source_lines, translation_lines, input_mode)
+        tuple: (source_lines, translation_lines, input_mode, src_lang, tgt_lang)
     """
     print(f"📂 Loading input files...")
     
@@ -189,12 +192,13 @@ def load_text_files(source_file: str, translation_file: str = None) -> tuple:
         if translation_file:
             print(f"   ⚠️  Translation file not found: {translation_file}")
             print(f"   ↳ Proceeding with source-only mode")
-        # Initialize empty translations for source-only mode
+            # Initialize empty translations for source-only mode
         translation_lines = [""] * len(source_lines)
         input_mode = "source_only"
     
     print(f"   📋 Input mode: {input_mode}")
-    return source_lines, translation_lines, input_mode
+    print(f"   🌐 Language pair: {src_lang} → {tgt_lang}")
+    return source_lines, translation_lines, input_mode, src_lang, tgt_lang
 
 
 class MultiGPUOllamaManager:
@@ -293,10 +297,13 @@ class MultiGPUOllamaManager:
 class RobustLLMProcessor:
     """
     Enhanced LLM processor with 3-tier robustness for translation and evaluation
+    Supports multiple language pairs
     """
     
-    def __init__(self, llm: ChatOllama):
+    def __init__(self, llm: ChatOllama, src_lang: str = "English", tgt_lang: str = "Vietnamese"):
         self.llm = llm
+        self.src_lang = src_lang
+        self.tgt_lang = tgt_lang
         
         # Setup parsers with multiple fallback tiers
         self.translation_parser = PydanticOutputParser(pydantic_object=Refine)
@@ -322,10 +329,9 @@ class RobustLLMProcessor:
             parser=self.feedback_parser, 
             llm=self.llm
         )
-        
-        # Setup optimized prompts
+          # Setup optimized prompts with language-specific system message
         self.template = ChatPromptTemplate.from_messages([
-            ("system", "You are a helpful assistant that translates English to Vietnamese."),
+            ("system", f"You are a helpful assistant that translates {self.src_lang} to {self.tgt_lang}. Provide accurate, fluent translations."),
             ("human", "{query}"),
         ])
         
@@ -381,24 +387,24 @@ class RobustLLMProcessor:
         # Prepare query based on input mode
         if current_translation and current_translation.strip() and feedback_text:
             # Refinement mode: improve existing translation
-            query = f"""Improve this Vietnamese translation of the English text based on the feedback provided.
+            query = f"""Improve this {self.tgt_lang} translation of the {self.src_lang} text based on the feedback provided.
 
-English: {src_text}
-Current Vietnamese translation: {current_translation}
+{self.src_lang}: {src_text}
+Current {self.tgt_lang} translation: {current_translation}
 Feedback for improvement: {feedback_text}
 
-Please provide an improved Vietnamese translation that addresses the feedback."""
+Please provide an improved {self.tgt_lang} translation that addresses the feedback."""
         elif current_translation and current_translation.strip():
             # Review mode: review and potentially improve existing translation
-            query = f"""Review and potentially improve this Vietnamese translation of the English text.
+            query = f"""Review and potentially improve this {self.tgt_lang} translation of the {self.src_lang} text.
 
-English: {src_text}
-Current Vietnamese translation: {current_translation}
+{self.src_lang}: {src_text}
+Current {self.tgt_lang} translation: {current_translation}
 
 If the translation is good, keep it as is. If it can be improved, provide a better version."""
         else:
             # Fresh translation mode
-            query = f"Translate this English text to Vietnamese: {src_text}"
+            query = f"Translate this {self.src_lang} text to {self.tgt_lang}: {src_text}"
         
         try:
             # Tier 1: Fast structured output (original approach)
@@ -439,12 +445,11 @@ If the translation is good, keep it as is. If it can be improved, provide a bett
                     fallback_text = current_translation if current_translation and current_translation.strip() else src_text
                     fallback_result = Refine(translation=fallback_text)
                     return self._validate_and_fallback_translation(fallback_result, current_translation, src_text)
-    
     def evaluate_translation_robust(self, src_text: str, translation: str) -> Feedback:
         """
         Evaluate translation with 3-tier robustness
         """
-        query = f"""You are a language expert. Rate this Vietnamese translation of the English text.
+        query = f"""You are a language expert. Rate this {self.tgt_lang} translation of the {self.src_lang} text.
 
 Rate from 1-3:
 3: Perfect translation
@@ -453,8 +458,8 @@ Rate from 1-3:
 1.5: Significant errors, partially understandable
 1: Poor translation, hard to understand
 
-English: {src_text}
-Vietnamese: {translation}
+{self.src_lang}: {src_text}
+{self.tgt_lang}: {translation}
 
 Provide grade and detailed feedback."""
         
@@ -505,21 +510,23 @@ Provide grade and detailed feedback."""
 class MultiGPULLMRefine:
     """
     Main class combining multi-GPU processing with robust error handling and file input support
+    Supports multiple language pairs
     """
     
-    def __init__(self, num_gpus: int = 4, model: str = "llama3.1:8b-instruct-fp16"):
+    def __init__(self, num_gpus: int = 4, model: str = "llama3.1:8b-instruct-fp16", src_lang: str = "English", tgt_lang: str = "Vietnamese"):
         self.gpu_manager = MultiGPUOllamaManager(num_gpus=num_gpus, model=model)
         self.processors = {}  # GPU-specific processors
         self.performance_stats = {}
+        self.src_lang = src_lang
+        self.tgt_lang = tgt_lang
         
     def setup_multi_gpu(self):
         """Setup multi-GPU environment"""
         active_gpus = self.gpu_manager.setup_multi_gpu_ollama()
-        
-        # Create processors for each GPU
+          # Create processors for each GPU
         for gpu_id in range(active_gpus):
             llm = self.gpu_manager.get_llm(gpu_id)
-            self.processors[gpu_id] = RobustLLMProcessor(llm)
+            self.processors[gpu_id] = RobustLLMProcessor(llm, self.src_lang, self.tgt_lang)
         
         return active_gpus
     
@@ -804,6 +811,8 @@ def run_multi_gpu_llm_refine_with_files(
     source_file: str,
     output_file: str,
     translation_file: str = None,
+    src_lang: str = "English",
+    tgt_lang: str = "Vietnamese",
     num_gpus: int = 4,
     model: str = "llama3.1:8b-instruct-fp16",
     max_iterations: int = 6,
@@ -811,12 +820,14 @@ def run_multi_gpu_llm_refine_with_files(
     cooling_rate: float = 0.4
 ):
     """
-    Main function for multi-GPU LLM refinement with file input support
+    Main function for multi-GPU LLM refinement with file input support and multiple language pairs
     
     Args:
         source_file: Path to source language file (required)
         output_file: Path for output translations
         translation_file: Path to existing translation file (optional)
+        src_lang: Source language name (e.g., "English", "French", "Chinese")
+        tgt_lang: Target language name (e.g., "Vietnamese", "Spanish", "German")
         num_gpus: Number of GPUs to use
         model: LLM model to use
         max_iterations: Maximum refinement iterations
@@ -828,13 +839,14 @@ def run_multi_gpu_llm_refine_with_files(
     if translation_file:
         print(f"   Translation file: {translation_file}")
     print(f"   Output file: {output_file}")
+    print(f"   Language pair: {src_lang} → {tgt_lang}")
     print(f"   GPUs: {num_gpus}, Model: {model}")
     
     # Load input files
-    src_sentences, tgt_sentences, input_mode = load_text_files(source_file, translation_file)
+    src_sentences, tgt_sentences, input_mode, actual_src_lang, actual_tgt_lang = load_text_files(source_file, translation_file, src_lang, tgt_lang)
     
     # Initialize multi-GPU refiner
-    refiner = MultiGPULLMRefine(num_gpus=num_gpus, model=model)
+    refiner = MultiGPULLMRefine(num_gpus=num_gpus, model=model, src_lang=actual_src_lang, tgt_lang=actual_tgt_lang)
     
     try:
         active_gpus = refiner.setup_multi_gpu()
@@ -925,11 +937,13 @@ def run_multi_gpu_llm_refine_with_files(
 
 def main():
     """Command line interface"""
-    parser = argparse.ArgumentParser(description='Multi-GPU LLM Translation Refinement System')
+    parser = argparse.ArgumentParser(description='Multi-GPU LLM Translation Refinement System with Multi-Language Support')
     
     parser.add_argument('source_file', help='Path to source language file')
     parser.add_argument('output_file', help='Path for output translations')
     parser.add_argument('--translation-file', '-t', help='Path to existing translation file (optional)')
+    parser.add_argument('--src-lang', '-s', default='English', help='Source language name (default: English)')
+    parser.add_argument('--tgt-lang', '-d', default='Vietnamese', help='Target language name (default: Vietnamese)')
     parser.add_argument('--num-gpus', '-g', type=int, default=4, help='Number of GPUs to use (default: 4)')
     parser.add_argument('--model', '-m', default='llama3.1:8b-instruct-fp16', help='LLM model to use')
     parser.add_argument('--max-iterations', '-i', type=int, default=6, help='Maximum refinement iterations (default: 6)')
@@ -943,6 +957,8 @@ def main():
         source_file=args.source_file,
         output_file=args.output_file,
         translation_file=args.translation_file,
+        src_lang=args.src_lang,
+        tgt_lang=args.tgt_lang,
         num_gpus=args.num_gpus,
         model=args.model,
         max_iterations=args.max_iterations,
