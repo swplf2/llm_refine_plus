@@ -344,6 +344,33 @@ class RobustLLMProcessor:
             'total_failures': 0
         }
     
+    def _validate_and_fallback_translation(self, result: Refine, current_translation: str, src_text: str) -> Refine:
+        """
+        Validate translation result and provide fallback if empty
+        
+        Args:
+            result: Translation result from LLM
+            current_translation: Current existing translation (if any)
+            src_text: Source text
+            
+        Returns:
+            Valid Refine object with non-empty translation
+        """
+        # Check if the result translation is empty or just whitespace
+        if not result.translation or not result.translation.strip():
+            print(f"⚠️ Empty translation detected, using fallback...")
+            # Fallback hierarchy: current_translation > src_text
+            if current_translation and current_translation.strip():
+                fallback_text = current_translation.strip()
+                print(f"   ↳ Using current translation as fallback")
+            else:
+                fallback_text = src_text.strip()
+                print(f"   ↳ Using source text as fallback")
+            
+            return Refine(translation=fallback_text)
+        
+        return result
+    
     def generate_translation_robust(self, src_text: str, current_translation: str = None, feedback_text: str = None) -> Refine:
         """
         Generate translation with 3-tier robustness:
@@ -377,7 +404,8 @@ If the translation is good, keep it as is. If it can be improved, provide a bett
             # Tier 1: Fast structured output (original approach)
             result = self.generator.invoke({"query": query})
             self.stats['fast_success'] += 1
-            return result
+            # Validate result and fallback if empty
+            return self._validate_and_fallback_translation(result, current_translation, src_text)
             
         except Exception as e:
             print(f"🔄 Fast generation failed, trying OutputFixingParser...")
@@ -387,7 +415,8 @@ If the translation is good, keep it as is. If it can be improved, provide a bett
                 response = self.llm.invoke(self.template.format_messages(query=query))
                 fixed_result = self.translation_fixing_parser.parse(response.content)
                 self.stats['fixing_success'] += 1
-                return fixed_result
+                # Validate result and fallback if empty
+                return self._validate_and_fallback_translation(fixed_result, current_translation, src_text)
                 
             except Exception as e2:
                 print(f"🔄 OutputFixingParser failed, trying RetryOutputParser...")
@@ -399,16 +428,17 @@ If the translation is good, keep it as is. If it can be improved, provide a bett
                         response.content, 
                         self.template.format_messages(query=query)
                     )
-                    self.stats['retry_success'] += 1
-                    return retry_result
+                    self.stats['retry_success'] += 1                    # Validate result and fallback if empty
+                    return self._validate_and_fallback_translation(retry_result, current_translation, src_text)
                     
                 except Exception as e3:
                     # Final fallback
                     print(f"❌ All parsing tiers failed: {e3}")
                     self.stats['total_failures'] += 1
-                    # Return original translation if it exists, otherwise source
+                    # Use validation function for consistent fallback logic
                     fallback_text = current_translation if current_translation and current_translation.strip() else src_text
-                    return Refine(translation=fallback_text)
+                    fallback_result = Refine(translation=fallback_text)
+                    return self._validate_and_fallback_translation(fallback_result, current_translation, src_text)
     
     def evaluate_translation_robust(self, src_text: str, translation: str) -> Feedback:
         """
