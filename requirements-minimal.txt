@@ -1,0 +1,19 @@
+# Essential requirements for Multi-GPU LLM Refine System
+# Install with: pip install -r requirements-minimal.txt
+
+# Core LangChain packages
+langchain>=0.1.0
+langchain-core>=0.1.0
+langchain-ollama>=0.1.0
+
+# Workflow orchestration
+langgraph>=0.0.40
+
+# Data validation
+pydantic>=2.0.0
+
+# Progress tracking
+tqdm>=4.64.0
+
+# Type hints
+typing-extensions>=4.5.0
