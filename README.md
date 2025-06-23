@@ -246,3 +246,60 @@ run_multi_gpu_llm_refine(
 - llama3.1:8b-instruct-q4_0 (memory efficient)
 - llama2:13b-chat (higher quality)
 - Custom fine-tuned models
+
+## File Input Support 🆕
+
+### Enhanced File-Based Processing (`file_input_refine.py`)
+
+The system now supports processing with source files and existing translation files for translation refinement:
+
+#### Input Modes
+
+1. **Source Only Mode** - Fresh translation from scratch
+   ```bash
+   python file_input_refine.py source.en output.vi
+   ```
+
+2. **Source + Translation Mode** - Refine existing translations
+   ```bash
+   python file_input_refine.py source.en output.vi --translation-file existing.vi
+   ```
+
+#### File Format Requirements
+
+**Source File (e.g., data.en)**
+- One sentence per line
+- UTF-8 encoding
+- Plain text format
+
+**Translation File (e.g., data.vi)**
+- One translation per line
+- Must match source file line count
+- UTF-8 encoding
+- Empty lines treated as missing translations
+
+#### Advanced Usage Examples
+
+```bash
+# Refine existing translations with custom settings
+python file_input_refine.py source.en improved.vi \
+  --translation-file current.vi \
+  --num-gpus 4 \
+  --model llama3.1:8b-instruct-fp16 \
+  --max-iterations 6
+
+# Fresh translation with minimal resources
+python file_input_refine.py source.en fresh.vi \
+  --num-gpus 2 \
+  --max-iterations 3
+
+# Get help for all options
+python file_input_refine.py --help
+```
+
+#### Demo File Input Processing
+
+```bash
+# Run file input demonstration
+python demo_file_input.py --demo
+```

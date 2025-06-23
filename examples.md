@@ -10,6 +10,7 @@ This document provides detailed examples and explanations for using the Multi-GP
 5. [Performance Optimization](#performance-optimization)
 6. [Code Architecture](#code-architecture)
 7. [Troubleshooting](#troubleshooting)
+8. [File Input Examples](#file-input-examples-)
 
 ## System Overview
 
@@ -580,4 +581,143 @@ def assess_translation_quality(source_file: str, output_file: str):
 assess_translation_quality("input.en", "output.vi")
 ```
 
-This comprehensive examples document covers all aspects of using the multi-GPU system, from basic usage to advanced configuration and troubleshooting. Users can refer to specific examples based on their needs and experience level.
+## File Input Examples 🆕
+
+### Example 1: Fresh Translation from Source File
+```python
+from file_input_refine import run_multi_gpu_llm_refine_with_files
+
+# Translate English file to Vietnamese
+run_multi_gpu_llm_refine_with_files(
+    source_file="document.en",          # Input: English sentences
+    output_file="document.vi",          # Output: Vietnamese translations
+    translation_file=None,              # No existing translation
+    num_gpus=4,
+    max_iterations=5
+)
+```
+
+**Input file format (document.en):**
+```
+Hello, how are you today?
+The weather is beautiful this morning.
+I would like to learn Vietnamese language.
+Machine translation has improved significantly.
+```
+
+**Output (document.vi):**
+```
+Xin chào, hôm nay bạn khỏe không?
+Thời tiết rất đẹp vào buổi sáng này.
+Tôi muốn học ngôn ngữ tiếng Việt.
+Dịch máy đã cải thiện đáng kể.
+```
+
+### Example 2: Refining Existing Translations
+```python
+# Improve existing Google Translate output
+run_multi_gpu_llm_refine_with_files(
+    source_file="source.en",
+    output_file="improved.vi",
+    translation_file="google_translate.vi",  # Existing translation to improve
+    num_gpus=2,
+    max_iterations=4
+)
+```
+
+**Scenario comparison:**
+
+*Original Google Translate (google_translate.vi):*
+```
+Xin chào, bạn như thế nào hôm nay?
+Thời tiết là đẹp sáng nay.
+Tôi muốn học ngôn ngữ Việt Nam.
+Dịch máy đã cải thiện đáng kể.
+```
+
+*After refinement (improved.vi):*
+```
+Xin chào, hôm nay bạn khỏe không?
+Thời tiết rất đẹp vào buổi sáng này.
+Tôi muốn học ngôn ngữ tiếng Việt.
+Dịch máy đã được cải thiện đáng kể.
+```
+
+### Example 3: Command Line Usage
+```bash
+# Fresh translation
+python file_input_refine.py data.en data_translated.vi --num-gpus 4
+
+# Refine existing translation
+python file_input_refine.py data.en data_refined.vi \
+  --translation-file existing_translation.vi \
+  --num-gpus 2 \
+  --max-iterations 6
+
+# Custom model and settings
+python file_input_refine.py large_dataset.en output.vi \
+  --translation-file current.vi \
+  --model "llama3.1:8b-instruct-fp16" \
+  --temperature 50.0 \
+  --cooling-rate 0.3
+```
+
+### Example 4: Handling Different Input Scenarios
+```python
+# Scenario A: Missing some translations
+def handle_partial_translations():
+    # Input files where some translations are missing
+    source_lines = [
+        "Hello world",
+        "Good morning", 
+        "Thank you",
+        "Goodbye"
+    ]
+    
+    existing_translations = [
+        "Xin chào thế giới",
+        "",  # Missing translation
+        "Cảm ơn",
+        ""   # Missing translation
+    ]
+    
+    # System will generate new translations for missing lines
+    # while refining existing ones
+
+# Scenario B: Different file encodings
+def handle_encoding_issues():
+    # System automatically handles UTF-8, latin-1 encodings
+    # Files with special characters are properly processed
+    pass
+
+# Scenario C: Large files
+def handle_large_files():
+    run_multi_gpu_llm_refine_with_files(
+        source_file="huge_dataset.en",  # 100K+ sentences
+        output_file="huge_output.vi",
+        num_gpus=8,                     # Use more GPUs
+        max_iterations=3                # Fewer iterations for speed
+    )
+```
+
+### Example 5: Demo and Testing
+```python
+# Run comprehensive demo
+import subprocess
+
+# Demo with sample files
+subprocess.run(["python", "demo_file_input.py", "--demo"])
+
+# Quick test of functionality
+subprocess.run(["python", "test_file_input.py"])
+
+# Test specific scenarios
+from test_file_input import create_test_files, test_file_loading
+
+# Create small test files
+source_file, translation_file = create_test_files()
+
+# Test file loading
+success = test_file_loading()
+print(f"File loading test: {'✓' if success else '❌'}")
+```
