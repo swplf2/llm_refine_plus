@@ -1,0 +1,97 @@
+from typing_extensions import TypedDict, Literal
+from langgraph.graph import StateGraph, START, END
+from pydantic import BaseModel, Field, ValidationError
+from langchain_ollama import ChatOllama
+from langchain.output_parsers import OutputFixingParser, RetryOutputParser
+from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.exceptions import OutputParserException
+from langchain.prompts import ChatPromptTemplate
+from tqdm import tqdm
+import random
+import math
+import json
+import re
+import time
+import subprocess
+import os
+import hashlib
+import argparse
+from typing import List, Dict, Optional, Union
+from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
+
+class Feedback(BaseModel):
+    """Enhanced feedback model with robust validation and fallbacks"""
+    grade: Literal["1", "1.5", "2", "2.5", "3"] = Field(
+        default="2", 
+        description="Translation quality score: 3=Perfect, 2.5=Minor errors, 2=Some errors, 1.5=Significant errors, 1=Poor"
+    )
+    feedback: str = Field(
+        default="Could not evaluate", 
+        description="Detailed feedback explaining the grade",
+    )
+    
+    def __init__(self, **data):
+        # Smart grade extraction and validation
+        print(f"FBDATA: {data}")
+        if 'grade' in data:
+            grade_str = str(data['grade'])
+            # Extract valid grade from various formats
+            grade_match = re.search(r'([123](?:\.5)?)', grade_str)
+            if grade_match:
+                data['grade'] = grade_match.group(1)
+            elif any(keyword in grade_str.lower() for keyword in ['perfect', 'excellent', 'hoàn hảo']):
+                data['grade'] = "3"
+            elif any(keyword in grade_str.lower() for keyword in ['good', 'tốt']):
+                data['grade'] = "2.5"
+            elif any(keyword in grade_str.lower() for keyword in ['poor', 'bad', 'kém']):
+                data['grade'] = "1"
+            else:
+                data['grade'] = "2"  # Safe default
+        
+        # Clean and validate feedback text
+        if 'feedback' in data and data['feedback']:
+            feedback = str(data['feedback']).strip()
+            # Remove common parsing artifacts
+            feedback = re.sub(r'^(Feedback|Grade|Score|Điểm|Phản hồi):\s*', '', feedback, flags=re.IGNORECASE)
+            feedback = re.sub(r'["\'\`]{1,3}', '', feedback)
+            data['feedback'] = feedback[:500] if len(feedback) > 500 else feedback
+        
+        super().__init__(**data)
+llm = ChatOllama(
+    model="llama3.1:8b-instruct-fp16",
+    base_url=f"http://127.0.0.1:11434",
+    temperature=0.1,
+    num_predict=512,
+    timeout=60
+)
+src_lang = "Vietnamese"
+tgt_lang = "English" 
+
+template = ChatPromptTemplate.from_messages([
+    ("system", f"You are a helpful assistant that translates {src_lang} to {tgt_lang}. Provide accurate, fluent translations."),
+    ("human", "{query}"),
+])
+        
+# Create chains with structured output (fast path)
+evaluator_llm = llm.with_structured_output(Feedback)
+
+evaluator = template | evaluator_llm
+
+query = f"""You are a language expert. Rate this {tgt_lang} translation of the {src_lang} text.
+
+Rate from 1-3:
+3: Perfect translation
+2.5: Minor errors but understandable  
+2: Some errors but mostly correct
+1.5: Significant errors, partially understandable
+1: Poor translation, hard to understand
+
+{src_lang}: Xin chào, bạn khỏe không?
+{tgt_lang}: Hello?
+Provide grade and detailed feedback."""
+
+result = evaluator.invoke({"query":query})
+# Validate result and fallback if empty
+print(f'Response: {result}')
+
+print(template.invoke({"query": query}).to_string())
