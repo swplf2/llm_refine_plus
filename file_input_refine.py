@@ -86,6 +86,7 @@ class Feedback(BaseModel):
     def __init__(self, **data):
         # Smart grade extraction and validation
         # print(f"FBDATA: {data}")
+        # print(f"***{data}***")
         if 'grade' in data:
             grade_str = str(data['grade'])
             # Extract valid grade from various formats
@@ -123,7 +124,7 @@ class Refine(BaseModel):
     
     def __init__(self, **data):
         # Clean translation text
-        # print(data)
+        # print(f"***{data}***")
         if 'translation' in data and data['translation']:
             translation = str(data['translation']).strip()
             # Remove common parsing artifacts
@@ -314,14 +315,14 @@ class RobustLLMProcessor:
         self.feedback_parser = PydanticOutputParser(pydantic_object=Feedback)
         
         # Tier 2: OutputFixingParser
-        # self.translation_fixing_parser = OutputFixingParser.from_llm(
-        #     parser=self.translation_parser, 
-        #     llm=self.llm
-        # )
-        # self.feedback_fixing_parser = OutputFixingParser.from_llm(
-        #     parser=self.feedback_parser, 
-        #     llm=self.llm
-        # )
+        self.translation_fixing_parser = OutputFixingParser.from_llm(
+            parser=self.translation_parser, 
+            llm=self.llm
+        )
+        self.feedback_fixing_parser = OutputFixingParser.from_llm(
+            parser=self.feedback_parser, 
+            llm=self.llm
+        )
         
         # Tier 3: RetryOutputParser
         # self.translation_retry_parser = RetryOutputParser.from_llm(
@@ -333,17 +334,17 @@ class RobustLLMProcessor:
         #     parser=self.feedback_parser, 
         #     llm=self.llm
         # )
-        self.translation_retry_parser = RetryWithErrorOutputParser.from_llm(
-            parser=self.translation_parser, 
-            llm=self.llm,
-            max_retries=2
-        )
+        # self.translation_retry_parser = RetryWithErrorOutputParser.from_llm(
+        #     parser=self.translation_parser, 
+        #     llm=self.llm,
+        #     max_retries=2
+        # )
 
-        self.feedback_retry_parser = RetryWithErrorOutputParser.from_llm(
-            parser=self.feedback_parser, 
-            llm=self.llm,
-            max_retries=2
-        )
+        # self.feedback_retry_parser = RetryWithErrorOutputParser.from_llm(
+        #     parser=self.feedback_parser, 
+        #     llm=self.llm,
+        #     max_retries=2
+        # )
 
 
 
@@ -441,13 +442,16 @@ If the translation is good, keep it as is. If it can be improved, provide a bett
             return self._validate_and_fallback_translation(result, current_translation, src_text)
         else:
             try:
-                print(f"🔄 Translation parsing failed, retry...| {query} | {err}")
-                prompt = self.template.format_messages(query=query)
-                result = self.translation_retry_parser.parse_with_prompt(raw.content, prompt)
+                print(f"🔄 Translation parsing failed, fixing...")
+                result = self.translation_fixing_parser.parse(raw.content)
                 self.stats['total_success'] += 1
                 return self._validate_and_fallback_translation(result, current_translation, src_text)
+                # prompt = self.template.format_messages(query=query)
+                # result = self.translation_retry_parser.parse_with_prompt(raw.content, prompt)
+                # self.stats['total_success'] += 1
+                # return self._validate_and_fallback_translation(result, current_translation, src_text)
             except Exception as e:
-                print(f"❌ Translation parsing failed, use current translation instead! | {query} | {e}")
+                print(f"❌ Translation parsing failed, use current translation instead!")
                 self.stats['total_failures'] += 1
                 # Use validation function for consistent fallback logic
                 fallback_text = current_translation if current_translation and current_translation.strip() else src_text
@@ -528,11 +532,17 @@ Provide grade and detailed feedback."""
             return result
         else:
             try:
-                print(f"🔄 Evaluation parsing failed, retry...")
-                prompt = self.template.format_messages(query=query)
-                result = self.feedback_retry_parser.parse_with_prompt(raw.content, prompt)
+                print(f"🔄 Evaluation parsing failed, fixing...")
+                result = self.feedback_fixing_parser.parse(raw.content)
                 self.stats['total_success'] += 1
                 return result
+            # except:
+            #     try:
+            #         print(f"🔄 Evaluation parsing failed, retry...")
+            #         prompt = self.template.format_messages(query=query)
+            #         result = self.feedback_retry_parser.parse_with_prompt(raw.content, prompt)
+            #         self.stats['total_success'] += 1
+            #         return result
             except Exception as e:
                 print(f"❌ Evaluation parsing failed, use default evaluation instead!")
                 # print(traceback.print_exc())
