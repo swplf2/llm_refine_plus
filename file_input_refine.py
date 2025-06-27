@@ -15,6 +15,7 @@ from langgraph.graph import StateGraph, START, END
 from pydantic import BaseModel, Field, ValidationError
 from langchain_ollama import ChatOllama
 from langchain.output_parsers import OutputFixingParser, RetryOutputParser
+from langchain.output_parsers.retry import RetryWithErrorOutputParser
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.exceptions import OutputParserException
 from langchain.prompts import ChatPromptTemplate
@@ -30,6 +31,7 @@ import hashlib
 import argparse
 from typing import List, Dict, Optional, Union
 from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
+import traceback
 
 
 # Enhanced State models for multi-GPU processing
@@ -61,7 +63,7 @@ class HiddenState(TypedDict):
     api_calls: int
     parse_successes: int
     parse_failures: int
-    retry_attempts: int
+    # retry_attempts: int
 
 class OverallState(MultiGPUState, HiddenState):
     pass
@@ -71,18 +73,19 @@ class OverallState(MultiGPUState, HiddenState):
 class Feedback(BaseModel):
     """Enhanced feedback model with robust validation and fallbacks"""
     grade: Literal["1", "1.5", "2", "2.5", "3"] = Field(
-        default="2", 
+        # default="2", 
         description="Translation quality score: 3=Perfect, 2.5=Minor errors, 2=Some errors, 1.5=Significant errors, 1=Poor"
     )
     feedback: str = Field(
-        default="Could not evaluate", 
+        # default="Could not evaluate", 
         description="Detailed feedback explaining the grade",
         min_length=5,
-        max_length=500
+        max_length=1000
     )
     
     def __init__(self, **data):
         # Smart grade extraction and validation
+        # print(f"FBDATA: {data}")
         if 'grade' in data:
             grade_str = str(data['grade'])
             # Extract valid grade from various formats
@@ -112,14 +115,15 @@ class Feedback(BaseModel):
 class Refine(BaseModel):
     """Enhanced translation model with cleanup and validation for multiple language pairs"""
     translation: str = Field(
-        default="", 
+        # default="", 
         description="High-quality translation in target language",
         min_length=1,
-        max_length=1000
+        max_length=2000
     )
     
     def __init__(self, **data):
         # Clean translation text
+        # print(data)
         if 'translation' in data and data['translation']:
             translation = str(data['translation']).strip()
             # Remove common parsing artifacts
@@ -310,25 +314,39 @@ class RobustLLMProcessor:
         self.feedback_parser = PydanticOutputParser(pydantic_object=Feedback)
         
         # Tier 2: OutputFixingParser
-        self.translation_fixing_parser = OutputFixingParser.from_llm(
-            parser=self.translation_parser, 
-            llm=self.llm
-        )
-        self.feedback_fixing_parser = OutputFixingParser.from_llm(
-            parser=self.feedback_parser, 
-            llm=self.llm
-        )
+        # self.translation_fixing_parser = OutputFixingParser.from_llm(
+        #     parser=self.translation_parser, 
+        #     llm=self.llm
+        # )
+        # self.feedback_fixing_parser = OutputFixingParser.from_llm(
+        #     parser=self.feedback_parser, 
+        #     llm=self.llm
+        # )
         
         # Tier 3: RetryOutputParser
-        self.translation_retry_parser = RetryOutputParser.from_llm(
+        # self.translation_retry_parser = RetryOutputParser.from_llm(
+        #     parser=self.translation_parser, 
+        #     llm=self.llm
+        # )
+
+        # self.feedback_retry_parser = RetryOutputParser.from_llm(
+        #     parser=self.feedback_parser, 
+        #     llm=self.llm
+        # )
+        self.translation_retry_parser = RetryWithErrorOutputParser.from_llm(
             parser=self.translation_parser, 
-            llm=self.llm
+            llm=self.llm,
+            max_retries=2
         )
 
-        self.feedback_retry_parser = RetryOutputParser.from_llm(
+        self.feedback_retry_parser = RetryWithErrorOutputParser.from_llm(
             parser=self.feedback_parser, 
-            llm=self.llm
+            llm=self.llm,
+            max_retries=2
         )
+
+
+
           # Setup optimized prompts with language-specific system message
         self.template = ChatPromptTemplate.from_messages([
             ("system", f"You are a helpful assistant that translates {self.src_lang} to {self.tgt_lang}. Provide accurate, fluent translations."),
@@ -336,17 +354,21 @@ class RobustLLMProcessor:
         ])
         
         # Create chains with structured output (fast path)
-        self.generator_llm = self.llm.with_structured_output(Refine)
-        self.evaluator_llm = self.llm.with_structured_output(Feedback)
+        self.generator_llm = self.llm.with_structured_output(Refine, include_raw=True)
+        self.evaluator_llm = self.llm.with_structured_output(Feedback, include_raw=True)
         
         self.generator = self.template | self.generator_llm
         self.evaluator = self.template | self.evaluator_llm
         
         # Performance tracking
+        # self.stats = {
+        #     'fast_success': 0,
+        #     'fixing_success': 0,
+        #     'retry_success': 0,
+        #     'total_failures': 0
+        # }
         self.stats = {
-            'fast_success': 0,
-            'fixing_success': 0,
-            'retry_success': 0,
+            'total_success': 0,
             'total_failures': 0
         }
     
@@ -363,6 +385,7 @@ class RobustLLMProcessor:
             Valid Refine object with non-empty translation
         """
         # Check if the result translation is empty or just whitespace
+        # print(f"result.translation: {result.translation}")
         if not result.translation or not result.translation.strip():
             print(f"⚠️ Empty translation detected, using fallback...")
             # Fallback hierarchy: current_translation > src_text
@@ -405,46 +428,76 @@ If the translation is good, keep it as is. If it can be improved, provide a bett
         else:
             # Fresh translation mode
             query = f"Translate this {self.src_lang} text to {self.tgt_lang}: {src_text}"
-        
-        try:
+        response = self.generator.invoke({"query": query})
+        raw = response["raw"]
+        err = response["parsing_error"]
+        if not err:
             # Tier 1: Fast structured output (original approach)
-            result = self.generator.invoke({"query": query})
-            self.stats['fast_success'] += 1
+            # print(f"Query: {query}")
+            result = response["parsed"]   
+            self.stats['total_success'] += 1
             # Validate result and fallback if empty
+            # print(f'Response: {result}')
             return self._validate_and_fallback_translation(result, current_translation, src_text)
-            
-        except Exception as e:
-            print(f"🔄 Fast generation failed, trying OutputFixingParser...")
-            
+        else:
             try:
-                # Tier 2: OutputFixingParser
-                response = self.llm.invoke(self.template.format_messages(query=query))
-                fixed_result = self.translation_fixing_parser.parse(response.content)
-                self.stats['fixing_success'] += 1
-                # Validate result and fallback if empty
-                return self._validate_and_fallback_translation(fixed_result, current_translation, src_text)
+                print(f"🔄 Translation parsing failed, retry...| {query} | {err}")
+                prompt = self.template.format_messages(query=query)
+                result = self.translation_retry_parser.parse_with_prompt(raw.content, prompt)
+                self.stats['total_success'] += 1
+                return self._validate_and_fallback_translation(result, current_translation, src_text)
+            except Exception as e:
+                print(f"❌ Translation parsing failed, use current translation instead! | {query} | {e}")
+                self.stats['total_failures'] += 1
+                # Use validation function for consistent fallback logic
+                fallback_text = current_translation if current_translation and current_translation.strip() else src_text
+                fallback_result = Refine(translation=fallback_text)
+                # return self._validate_and_fallback_translation(fallback_result, current_translation, src_text)
+                return fallback_result
+            
+        # except Exception as e:
+        #     print(f"🔄 Fast generation failed, trying OutputFixingParser...")
+            
+        #     try:
+        #         # Tier 2: OutputFixingParser
+        #         response = self.llm.invoke(self.template.format_messages(query=query))
+        #         fixed_result = self.translation_fixing_parser.parse(response.content)
+        #         self.stats['fixing_success'] += 1
+        #         # Validate result and fallback if empty
+        #         return self._validate_and_fallback_translation(fixed_result, current_translation, src_text)
                 
-            except Exception as e2:
-                print(f"🔄 OutputFixingParser failed, trying RetryOutputParser...")
+        #     except Exception as e2:
+        #         print(f"🔄 OutputFixingParser failed, trying RetryOutputParser...")
                 
-                try:
-                    # Tier 3: RetryOutputParser (full retry with context)
-                    response = self.llm.invoke(self.template.format_messages(query=query))
-                    retry_result = self.translation_retry_parser.parse_with_prompt(
-                        response.content, 
-                        self.template.format_messages(query=query)
-                    )
-                    self.stats['retry_success'] += 1                    # Validate result and fallback if empty
-                    return self._validate_and_fallback_translation(retry_result, current_translation, src_text)
+        #         try:
+        #             # Tier 3: RetryOutputParser (full retry with context)
+        #             response = self.llm.invoke(self.template.format_messages(query=query))
+        #             retry_result = self.translation_retry_parser.parse_with_prompt(
+        #                 response.content, 
+        #                 self.template.format_messages(query=query)
+        #             )
+        #             self.stats['retry_success'] += 1                    # Validate result and fallback if empty
+        #             return self._validate_and_fallback_translation(retry_result, current_translation, src_text)
                     
-                except Exception as e3:
-                    # Final fallback
-                    print(f"❌ All parsing tiers failed: {e3}")
-                    self.stats['total_failures'] += 1
-                    # Use validation function for consistent fallback logic
-                    fallback_text = current_translation if current_translation and current_translation.strip() else src_text
-                    fallback_result = Refine(translation=fallback_text)
-                    return self._validate_and_fallback_translation(fallback_result, current_translation, src_text)
+        #         except Exception as e3:
+        #             # Final fallback
+        #             print(f"❌ All parsing tiers failed: {e3}")
+        #             self.stats['total_failures'] += 1
+        #             # Use validation function for consistent fallback logic
+        #             fallback_text = current_translation if current_translation and current_translation.strip() else src_text
+        #             fallback_result = Refine(translation=fallback_text)
+        #             # return self._validate_and_fallback_translation(fallback_result, current_translation, src_text)
+        #             return fallback_result
+
+        # else:
+        #     # Final fallback
+        #     print(f"❌ Translation parsing failed, use current translation instead!")
+        #     self.stats['total_failures'] += 1
+        #     # Use validation function for consistent fallback logic
+        #     fallback_text = current_translation if current_translation and current_translation.strip() else src_text
+        #     fallback_result = Refine(translation=fallback_text)
+        #     # return self._validate_and_fallback_translation(fallback_result, current_translation, src_text)
+        #     return fallback_result
     def evaluate_translation_robust(self, src_text: str, translation: str) -> Feedback:
         """
         Evaluate translation with 3-tier robustness
@@ -462,40 +515,74 @@ Rate from 1-3:
 {self.tgt_lang}: {translation}
 
 Provide grade and detailed feedback."""
-        
-        try:
-            # Tier 1: Fast structured output
-            result = self.evaluator.invoke({"query": query})
-            self.stats['fast_success'] += 1
+        response = self.evaluator.invoke({"query": query})
+        raw = response["raw"]
+        err = response["parsing_error"]
+        if not err:
+            # Tier 1: Fast structured output (original approach)
+            # print(f"Query: {query}")
+            result = response["parsed"]   
+            self.stats['total_success'] += 1
+            # Validate result and fallback if empty
+            # print(f'Response: {result}')
             return result
-            
-        except Exception as e:
-            print(f"🔄 Fast evaluation failed, trying OutputFixingParser...")
-            
+        else:
             try:
-                # Tier 2: OutputFixingParser
-                response = self.llm.invoke(self.template.format_messages(query=query))
-                fixed_result = self.feedback_fixing_parser.parse(response.content)
-                self.stats['fixing_success'] += 1
-                return fixed_result
+                print(f"🔄 Evaluation parsing failed, retry...")
+                prompt = self.template.format_messages(query=query)
+                result = self.feedback_retry_parser.parse_with_prompt(raw.content, prompt)
+                self.stats['total_success'] += 1
+                return result
+            except Exception as e:
+                print(f"❌ Evaluation parsing failed, use default evaluation instead!")
+                # print(traceback.print_exc())
+                self.stats['total_failures'] += 1
+                # return Feedback(grade="2", feedback=f"Evaluation failed: {str(e3)[:100]}")
+                return Feedback(grade="2", feedback=f"If the translation is good, keep it as is. If it can be improved, provide a better version.")
+        # try:
+        #     # Tier 1: Fast structured output
+        #     # print(f"FBQR: {query}")
+        #     result = self.evaluator.invoke({"query": query})
+        #     self.stats['total_success'] += 1
+        #     # print(f"Feedback: {result}")
+        #     return result
+            
+        # except Exception as e:
+        #     print(f"🔄 Fast evaluation failed, trying OutputFixingParser...")
+        #     print(traceback.print_exc())
+            
+        #     try:
+        #         # Tier 2: OutputFixingParser
+        #         response = self.llm.invoke(self.template.format_messages(query=query))
+        #         fixed_result = self.feedback_fixing_parser.parse(response.content)
+        #         self.stats['fixing_success'] += 1
+        #         return fixed_result
                 
-            except Exception as e2:
-                print(f"🔄 OutputFixingParser failed, trying RetryOutputParser...")
-                
-                try:
-                    # Tier 3: RetryOutputParser
-                    response = self.llm.invoke(self.template.format_messages(query=query))
-                    retry_result = self.feedback_retry_parser.parse_with_prompt(
-                        response.content,
-                        self.template.format_messages(query=query)
-                    )
-                    self.stats['retry_success'] += 1
-                    return retry_result
+        #     except Exception as e2:
+        #         print(f"🔄 OutputFixingParser failed, trying RetryOutputParser...")
+        #         print(traceback.print_exc())
+        #         try:
+        #             # Tier 3: RetryOutputParser
+        #             response = self.llm.invoke(self.template.format_messages(query=query))
+        #             retry_result = self.feedback_retry_parser.parse_with_prompt(
+        #                 response.content,
+        #                 self.template.format_messages(query=query)
+        #             )
+        #             self.stats['retry_success'] += 1
+        #             return retry_result
                     
-                except Exception as e3:
-                    print(f"❌ All evaluation parsing failed: {e3}")
-                    self.stats['total_failures'] += 1
-                    return Feedback(grade="2", feedback=f"Evaluation failed: {str(e3)[:100]}")
+        #         except Exception as e3:
+        #             print(f"❌ All evaluation parsing failed: {e3}")
+        #             print(traceback.print_exc())
+        #             self.stats['total_failures'] += 1
+        #             # return Feedback(grade="2", feedback=f"Evaluation failed: {str(e3)[:100]}")
+        #             return Feedback(grade="2", feedback=f"If the translation is good, keep it as is. If it can be improved, provide a better version.")
+        # except Exception as e:
+        #     print(f"❌ Evaluation parsing failed, use default evaluation instead!")
+        #     # print(traceback.print_exc())
+        #     self.stats['total_failures'] += 1
+        #     # return Feedback(grade="2", feedback=f"Evaluation failed: {str(e3)[:100]}")
+        #     return Feedback(grade="2", feedback=f"If the translation is good, keep it as is. If it can be improved, provide a better version.")
     
     def get_performance_stats(self) -> Dict:
         """Get performance statistics"""
@@ -532,18 +619,26 @@ class MultiGPULLMRefine:
     
     def process_chunk_on_gpu(self, chunk_data: tuple) -> Dict:
         """Process a chunk of sentences on a specific GPU"""
-        chunk_src, chunk_tgt, gpu_id, input_mode = chunk_data
+        has_feedback = False
+        if len(chunk_data) == 4:
+            chunk_src, chunk_tgt, gpu_id, input_mode = chunk_data
+        else:
+            chunk_src, chunk_tgt, chunk_fb, gpu_id, input_mode = chunk_data
+            has_feedback = True
         
         processor = self.processors[gpu_id]
         chunk_results = []
         
-        print(f"🔄 GPU {gpu_id} processing {len(chunk_src)} sentences in {input_mode} mode...")
+        print(f"🔄 GPU {gpu_id} processing {len(chunk_src)} sentences in {input_mode} mode, feedback: {has_feedback}...")
         
         for i, (src_text, existing_translation) in enumerate(tqdm(zip(chunk_src, chunk_tgt), desc=f"GPU {gpu_id}")):
             try:
                 if input_mode == "source_and_translation":
                     # Use existing translation as base for refinement
-                    result = processor.generate_translation_robust(src_text, existing_translation)
+                    if has_feedback:
+                        result = processor.generate_translation_robust(src_text, existing_translation, chunk_fb[i])
+                    else:
+                        result = processor.generate_translation_robust(src_text, existing_translation)
                 else:
                     # Fresh translation
                     result = processor.generate_translation_robust(src_text)
@@ -588,7 +683,8 @@ class MultiGPULLMRefine:
             except Exception as e:
                 print(f"❌ GPU {gpu_id} evaluation error: {e}")
                 grades.append("1")
-                feedbacks.append(f"Evaluation error: {str(e)[:100]}")
+                # feedbacks.append(f"Evaluation error: {str(e)[:100]}")
+                feedbacks.append(f"If the translation is good, keep it as is. If it can be improved, provide a better version.")
         
         chunk_stats = processor.get_performance_stats()
         
@@ -600,7 +696,7 @@ class MultiGPULLMRefine:
         }
 
 
-def llm_call_generator_multi_gpu(state: MultiGPUState, refiner: MultiGPULLMRefine) -> HiddenState:
+def llm_call_generator_multi_gpu(state: OverallState, refiner: MultiGPULLMRefine) -> HiddenState:
     """Multi-GPU generator with file input support"""
     print(f"🚀 Multi-GPU Generator iteration {state['i']} (Mode: {state.get('input_mode', 'unknown')})")
     start_time = time.time()
@@ -612,6 +708,7 @@ def llm_call_generator_multi_gpu(state: MultiGPUState, refiner: MultiGPULLMRefin
     # Split sentences across GPUs
     src_sentences = state['src']
     existing_translations = state.get('tgt', [""] * len(src_sentences))
+    feedbacks = state.get("h_feedback")
     input_mode = state.get('input_mode', 'source_only')
     
     chunk_size = len(src_sentences) // active_gpus
@@ -626,12 +723,16 @@ def llm_call_generator_multi_gpu(state: MultiGPUState, refiner: MultiGPULLMRefin
         
         chunk_src = src_sentences[start_idx:end_idx]
         chunk_tgt = existing_translations[start_idx:end_idx]
-        
-        chunks.append((chunk_src, chunk_tgt, gpu_id, input_mode))
+        if feedbacks:
+            chunk_fb = feedbacks[start_idx:end_idx]
+            chunks.append((chunk_src, chunk_tgt, chunk_fb, gpu_id, input_mode))
+        else:
+            chunks.append((chunk_src, chunk_tgt, gpu_id, input_mode))
     
     # Process chunks in parallel
     all_results = []
-    total_stats = {'fast_success': 0, 'fixing_success': 0, 'retry_success': 0, 'total_failures': 0}
+    # total_stats = {'total_success': 0, 'fixing_success': 0, 'retry_success': 0, 'total_failures': 0}
+    total_stats = {'total_success': 0, 'total_failures': 0}
     
     with ThreadPoolExecutor(max_workers=active_gpus) as executor:
         futures = [executor.submit(refiner.process_chunk_on_gpu, chunk_data) for chunk_data in chunks]
@@ -659,7 +760,7 @@ def llm_call_generator_multi_gpu(state: MultiGPUState, refiner: MultiGPULLMRefin
         "api_calls": sum(total_stats.values()),
         "parse_failures": total_stats['total_failures'],
         "parse_successes": sum(total_stats.values()) - total_stats['total_failures'],
-        "retry_attempts": total_stats['fixing_success'] + total_stats['retry_success']
+        # "retry_attempts": total_stats['fixing_success'] + total_stats['retry_success']
     }
 
 
@@ -689,7 +790,8 @@ def llm_call_evaluator_multi_gpu(state: OverallState, refiner: MultiGPULLMRefine
     
     # Process evaluation in parallel
     all_results = []
-    total_stats = {'fast_success': 0, 'fixing_success': 0, 'retry_success': 0, 'total_failures': 0}
+    # total_stats = {'total_success': 0, 'fixing_success': 0, 'retry_success': 0, 'total_failures': 0}
+    total_stats = {'total_success': 0, 'total_failures': 0}
     
     with ThreadPoolExecutor(max_workers=active_gpus) as executor:
         futures = [executor.submit(refiner.process_evaluation_chunk_on_gpu, chunk_data) for chunk_data in chunks]
@@ -720,7 +822,7 @@ def llm_call_evaluator_multi_gpu(state: OverallState, refiner: MultiGPULLMRefine
         "api_calls": sum(total_stats.values()),
         "parse_failures": total_stats['total_failures'],
         "parse_successes": sum(total_stats.values()) - total_stats['total_failures'],
-        "retry_attempts": total_stats['fixing_success'] + total_stats['retry_success']
+        # "retry_attempts": total_stats['fixing_success'] + total_stats['retry_success']
     }
 
 
@@ -898,7 +1000,7 @@ def run_multi_gpu_llm_refine_with_files(
         print("🔄 Executing multi-GPU optimization workflow...")
         start_time = time.time()
         
-        final_state = compiled_workflow.invoke(initial_state, {"recursion_limit": max_iterations * 3})
+        final_state = compiled_workflow.invoke(initial_state, {"recursion_limit": max_iterations * 10})
         
         total_time = time.time() - start_time
         
